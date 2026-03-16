@@ -3422,3 +3422,64 @@ t.test(
 
   },
 )
+
+t.test('no linking through a symlink', t => {
+  const types = ['Link', 'SymbolicLink']
+  for (const type of types) {
+    t.test(type, t => {
+      const exploit = makeTar([
+        {
+          type: 'SymbolicLink',
+          path: 'a/b/up',
+          linkpath: '../..',
+          mode: 0o755,
+        },
+        {
+          type: 'SymbolicLink',
+          path: 'a/b/escape',
+          linkpath: 'up/..',
+          mode: 0o755,
+        },
+        {
+          type,
+          path: 'exploit',
+          linkpath: 'a/b/escape/exploited-file',
+          mode: 0o755,
+        },
+        '',
+        '',
+      ])
+      const setup = t => t.testdir({
+        x: {},
+        'exploited-file': 'original content',
+      })
+      const check = t => {
+        fs.writeFileSync(t.testdirName + '/x/exploit', 'pwned')
+        t.equal(
+          fs.readFileSync(t.testdirName + '/exploited-file', 'utf8'),
+          'original content',
+        )
+      }
+      t.test('sync', t => {
+        const cwd = setup(t)
+        t.throws(() => {
+          new UnpackSync({ cwd, strict: true }).end(exploit)
+        })
+        check(t)
+        t.end()
+      })
+      t.test('async', async t => {
+        const cwd = setup(t)
+        await t.rejects(new Promise((res, rej) => {
+          new Unpack({ cwd, strict: true })
+            .on('finish', res)
+            .on('error', rej)
+            .end(exploit)
+        }))
+        check(t)
+      })
+      t.end()
+    })
+  }
+  t.end()
+})

@@ -31,6 +31,7 @@ const DIRECTORY = Symbol('directory')
 const LINK = Symbol('link')
 const SYMLINK = Symbol('symlink')
 const HARDLINK = Symbol('hardlink')
+const ENSURE_NO_SYMLINK = Symbol('ensureNoSymlink')
 const UNSUPPORTED = Symbol('unsupported')
 const CHECKPATH = Symbol('checkPath')
 const STRIPABSOLUTEPATH = Symbol('stripAbsolutePath')
@@ -274,7 +275,9 @@ export class Unpack extends Parser {
     const { type } = entry
     if (!p || this.preservePaths) return true
 
-    const parts = p.split('/')
+    // strip off the root
+    const [root, stripped] = stripAbsolutePath(p)
+    const parts = stripped.replace(/\\/g, '/').split('/')
 
     if (
       parts.includes('..') ||
@@ -298,7 +301,7 @@ export class Unpack extends Parser {
         // tar paths, not a filesystem.
         const entryDir = path.posix.dirname(entry.path)
         const resolved = path.posix.normalize(
-          path.posix.join(entryDir, p),
+          path.posix.join(entryDir, parts.join('/'))
         )
         // If the resolved path escapes (starts with ..), reject it
         if (resolved.startsWith('../') || resolved === '..') {
@@ -315,8 +318,6 @@ export class Unpack extends Parser {
       }
     }
 
-    // strip off the root
-    const [root, stripped] = stripAbsolutePath(p)
     if (root) {
       // ok, but triggers warning about stripping root
       entry[field] = String(stripped)
@@ -663,14 +664,62 @@ export class Unpack extends Parser {
   }
 
   [SYMLINK](entry: ReadEntry, done: () => void) {
-    this[LINK](entry, String(entry.linkpath), 'symlink', done)
+    const parts = normalizeWindowsPath(
+      path.relative(
+        this.cwd,
+        path.resolve(path.dirname(String(entry.absolute)), String(entry.linkpath)),
+      ),
+    ).split('/')
+    this[ENSURE_NO_SYMLINK](
+      entry,
+      this.cwd,
+      parts,
+      () => this[LINK](entry, String(entry.linkpath), 'symlink', done),
+      er => {
+        this[ONERROR](er, entry)
+        done()
+      },
+    )
   }
 
   [HARDLINK](entry: ReadEntry, done: () => void) {
     const linkpath = normalizeWindowsPath(
       path.resolve(this.cwd, String(entry.linkpath)),
     )
-    this[LINK](entry, linkpath, 'link', done)
+    const parts = normalizeWindowsPath(String(entry.linkpath)).split('/')
+    this[ENSURE_NO_SYMLINK](
+      entry,
+      this.cwd,
+      parts,
+      () => this[LINK](entry, linkpath, 'link', done),
+      er => {
+        this[ONERROR](er, entry)
+        done()
+      },
+    )
+  }
+
+  [ENSURE_NO_SYMLINK](
+    entry: ReadEntry,
+    cwd: string,
+    parts: string[],
+    done: () => void,
+    onError: (er: Error) => void,
+  ) {
+    const p = parts.shift()
+    if (this.preservePaths || p === undefined) return done()
+    const t = path.resolve(cwd, p)
+    fs.lstat(t, (er, st) => {
+      if (er) return done()
+      if (st && st.isSymbolicLink()) {
+        return onError(
+          new Error(
+            'TAR_SYMLINK_ERROR: Cannot extract through symbolic link',
+          ),
+        )
+      }
+      this[ENSURE_NO_SYMLINK](entry, t, parts, done, onError)
+    })
   }
 
   [PEND]() {
@@ -1087,6 +1136,34 @@ export class UnpackSync extends Unpack {
     } catch (er) {
       return er
     }
+  }
+
+  [ENSURE_NO_SYMLINK](
+    _entry: ReadEntry,
+    cwd: string,
+    parts: string[],
+    done: () => void,
+    onError: (er: Error) => void,
+  ) {
+    if (this.preservePaths || !parts.length) return done()
+    let t = cwd
+    for (const p of parts) {
+      t = path.resolve(t, p)
+      let st
+      try {
+        st = fs.lstatSync(t)
+      } catch (er) {
+        return done()
+      }
+      if (st.isSymbolicLink()) {
+        return onError(
+          new Error(
+            'TAR_SYMLINK_ERROR: Cannot extract through symbolic link',
+          ),
+        )
+      }
+    }
+    done()
   }
 
   [LINK](
