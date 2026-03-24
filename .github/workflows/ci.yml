@@ -13,7 +13,7 @@ jobs:
   build:
     strategy:
       matrix:
-        node-version: [22.x, 24.x]
+        node-version: [22.x]
         platform:
         - os: ubuntu-latest
           shell: bash
@@ -40,3 +40,12 @@ jobs:
 
       - name: Run Tests
         run: npm test -- -c
+
+      - name: Pack
+        run: npm pack
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tar-${{ matrix.platform.os }}-${{ matrix.node-version }}
+          path: "*.tgz"
